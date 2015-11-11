@@ -266,9 +266,7 @@ function run_change_password_test() {
     DB='admin' assert_login_access 'admin' "NEW_${admin_password}" true
     DB='admin' assert_login_access 'admin' ${admin_password} false
 
-    # need to remove volume_dir with sudo because of permissions of files written
-    # by the Docker container
-    sudo rm -rf ${volume_dir}
+    rm -rf ${volume_dir}
 
     echo "  Success!"
 }
