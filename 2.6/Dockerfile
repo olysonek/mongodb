@@ -26,21 +26,15 @@ EXPOSE 27017
 # change, the last test is there to make sure of that.
 # Due to the https://bugzilla.redhat.com/show_bug.cgi?id=1206151,
 # the whole /var/lib/mongodb/ dir has to be chown-ed.
-RUN yum install -y epel-release && \
-    rpmkeys --import file:///etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-7 && \
-    yum -y --setopt=tsflags=nodocs install \
-    https://www.softwarecollections.org/en/scls/rhscl/v8314/epel-7-x86_64/download/rhscl-v8314-epel-7-x86_64.noarch.rpm \
-    https://www.softwarecollections.org/en/scls/rhscl/rh-mongodb26/epel-7-x86_64/download/rhscl-rh-mongodb26-epel-7-x86_64.noarch.rpm \
-    https://www.softwarecollections.org/en/scls/rhscl/rh-java-common/epel-7-x86_64/download/rhscl-rh-java-common-epel-7-x86_64.noarch.rpm && \
-    yum install -y --setopt=tsflags=nodocs bind-utils gettext iproute v8314 rh-mongodb26-mongodb rh-mongodb26 && \
+RUN yum install -y centos-release-scl && \
+    INSTALL_PKGS="bind-utils gettext iproute rsync tar v8314 rh-mongodb26-mongodb rh-mongodb26" && \
+    yum install -y --setopt=tsflags=nodocs $INSTALL_PKGS && \
+    rpm -V $INSTALL_PKGS && \
     yum clean all && \
     mkdir -p /var/lib/mongodb/data && chown -R mongodb.0 /var/lib/mongodb/ /var/opt/rh/rh-mongodb26/lib/mongodb && \
-    test "$(id mongodb)" = "uid=184(mongodb) gid=998(mongodb) groups=998(mongodb)" && \
     # Loosen permission bits to avoid problems running container with arbitrary UID
-    chmod g+w -R /var/opt/rh/rh-mongodb26/lib/mongodb
-
-# Loosen permission bits to avoid problems running container with arbitrary UID
-RUN chmod -R g+rwx /var/lib/mongodb
+    chmod g+w -R /var/opt/rh/rh-mongodb26/lib/mongodb && \
+    chmod -R g+rwx /var/lib/mongodb
 
 # Get prefix path and path to scripts rather than hard-code them in scripts
 ENV CONTAINER_SCRIPTS_PATH=/usr/share/container-scripts/mongodb \
