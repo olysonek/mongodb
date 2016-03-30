@@ -45,17 +45,14 @@ function wait_for_mongo_up() {
   local mongo_cmd
   mongo_cmd="mongo admin "
 
-  if [ ! -z "${mongo_host}" ]; then
+  if [ -n "${mongo_host}" ]; then
     mongo_cmd+="--host ${mongo_host}:${CONTAINER_PORT} "
   fi
 
+  local i
   for i in $(seq $MAX_ATTEMPTS); do
     echo "=> Waiting for MongoDB service startup ${mongo_host} ..."
-    set +e
-    $mongo_cmd --eval "help" &>/dev/null
-    status=$?
-    set -e
-    if [ $status -eq 0 ]; then
+    if $mongo_cmd --eval 'help' &>/dev/null; then
       echo "=> MongoDB service has started"
       return 0
     fi
@@ -67,13 +64,10 @@ function wait_for_mongo_up() {
 
 # wait_for_mongo_down waits until the mongo server is down
 function wait_for_mongo_down() {
+  local i
   for i in $(seq $MAX_ATTEMPTS); do
     echo "=> Waiting for MongoDB service shutdown ..."
-    set +e
-    mongo admin --eval "help" &>/dev/null
-    status=$?
-    set -e
-    if [ $status -ne 0 ]; then
+    if ! mongo admin --eval 'help' &>/dev/null; then
       echo "=> MongoDB service has stopped"
       return 0
     fi
@@ -92,52 +86,99 @@ function endpoints() {
 }
 
 # build_mongo_config builds the MongoDB replicaSet config used for the cluster
-# initialization
+# initialization.
+# Takes a list of space-separated member IPs as the first argument.
 function build_mongo_config() {
+  local current_endpoints
+  current_endpoints="$1"
   local members
   members="{ _id: 0, host: \"$(mongo_addr)\"},"
   local member_id
   member_id=1
   local container_addr
   container_addr="$(container_addr)"
-  for node in $(endpoints); do
-    [ "$node" == container_addr ] && continue
-    members+="{ _id: ${member_id}, host: \"${node}:${CONTAINER_PORT}\"},"
-    let member_id++
+  local node
+  for node in ${current_endpoints}; do
+    if [ "$node" != "$container_addr" ]; then
+      members+="{ _id: ${member_id}, host: \"${node}:${CONTAINER_PORT}\"},"
+      let member_id++
+    fi
   done
   echo -n "var config={ _id: \"${MONGODB_REPLICA_NAME}\", members: [ ${members%,} ] }"
 }
 
-# mongo_initiate initiate the replica set
+# mongo_initiate initiates the replica set.
+# Takes a list of space-separated member IPs as the first argument.
 function mongo_initiate() {
   local mongo_wait
   mongo_wait="while (rs.status().startupStatus || (rs.status().hasOwnProperty(\"myState\") && rs.status().myState != 1)) { printjson( rs.status() ); sleep(1000); }; printjson( rs.status() );"
-  config=$(build_mongo_config)
+  config=$(build_mongo_config "$1")
   echo "=> Initiating MongoDB replica using: ${config}"
   mongo admin --eval "${config};rs.initiate(config);${mongo_wait}"
 }
 
 # get the address of the current primary member
 function mongo_primary_member_addr() {
-  local current_endpoints
-  current_endpoints=$(endpoints)
-  local mongo_node
-  mongo_node="$(echo "${current_endpoints}" | grep -v "$(container_addr)" | head -1):${CONTAINER_PORT}"
-  echo -n $(mongo admin -u admin -p "${MONGODB_ADMIN_PASSWORD}" --host ${mongo_node} --quiet --eval "print(rs.isMaster().primary);")
+  local rc=0
+
+  endpoints | grep -v "$(container_addr)" |
+  (
+    while read mongo_node; do
+      cmd_output="$(mongo admin -u admin -p "$MONGODB_ADMIN_PASSWORD" --host "$mongo_node:$CONTAINER_PORT" --eval 'print(rs.isMaster().primary)' --quiet || true)"
+
+      # Trying to find IP:PORT in output and filter out error message because mongo prints it to stdout
+      ip_and_port_regexp='[0-9]\+\.[0-9]\+\.[0-9]\+\.[0-9]\+:[0-9]\+'
+      if addr="$(echo "$cmd_output" | grep -x "$ip_and_port_regexp")"; then
+        echo -n "$addr"
+        exit 0
+      fi
+
+      echo >&2 "Cannot get address of primary from $mongo_node node: $cmd_output"
+    done
+
+    exit 1
+  ) || rc=$?
+
+  if [ $rc -ne 0 ]; then
+    echo >&2 "Cannot get address of primary node: after checking all nodes we don't have the address"
+    return 1
+  fi
 }
 
 # mongo_remove removes the current MongoDB from the cluster
 function mongo_remove() {
-  echo "=> Removing $(mongo_addr) on $(mongo_primary_member_addr) ..."
+  local primary_addr
+  # if we cannot determine the IP address of the primary, exit without an error
+  # to allow callers to proceed with their logic
+  primary_addr="$(mongo_primary_member_addr || true)"
+  if [ -z "$primary_addr" ]; then
+    return
+  fi
+
+  local mongo_addr
+  mongo_addr="$(mongo_addr)"
+
+  echo "=> Removing ${mongo_addr} on ${primary_addr} ..."
   mongo admin -u admin -p "${MONGODB_ADMIN_PASSWORD}" \
-    --host $(mongo_primary_member_addr) --eval "rs.remove('$(mongo_addr)');" &>/dev/null || true
+    --host "${primary_addr}" --eval "rs.remove('${mongo_addr}');" || true
 }
 
 # mongo_add advertise the current container to other mongo replicas
 function mongo_add() {
-  echo "=> Adding $(mongo_addr) to $(mongo_primary_member_addr) ..."
+  local primary_addr
+  # if we cannot determine the IP address of the primary, exit without an error
+  # to allow callers to proceed with their logic
+  primary_addr="$(mongo_primary_member_addr || true)"
+  if [ -z "$primary_addr" ]; then
+    return
+  fi
+
+  local mongo_addr
+  mongo_addr="$(mongo_addr)"
+
+  echo "=> Adding ${mongo_addr} to ${primary_addr} ..."
   mongo admin -u admin -p "${MONGODB_ADMIN_PASSWORD}" \
-    --host $(mongo_primary_member_addr) --eval "rs.add('$(mongo_addr)');"
+    --host "${primary_addr}" --eval "rs.add('${mongo_addr}');"
 }
 
 # run_mongod_supervisor runs the MongoDB replica supervisor that manages
